@@ -37,17 +37,20 @@ type peerMap struct {
 
 func newPeerMap() peerMap {
 	p := peerMap{peers: make(map[string]struct{})}
-	go func() {
-		for {
-			select {
-			case peer := <-p.expire:
-				p.Lock()
-				delete(p.peers, peer)
-				p.Unlock()
-			}
-		}
-	}()
+	go p.expireLoop()
+
 	return p
+}
+
+func (p peerMap) expireLoop() {
+	for {
+		select {
+		case peer := <-p.expire:
+			p.Lock()
+			delete(p.peers, peer)
+			p.Unlock()
+		}
+	}
 }
 
 func (p peerMap) Add(peer string) {
@@ -151,15 +154,12 @@ func handleLocal(w http.ResponseWriter, r *http.Request) {
 		newUrl.Host = peer
 		newUrl.Scheme = "http"
 
-		if r.Method == "HEAD" {
-			resp, err := http.Head(newUrl.String())
-			if err == nil {
+		resp, err := http.Head(newUrl.String())
+		if err == nil {
+			if r.Method == "HEAD" {
 				w.WriteHeader(resp.StatusCode)
 				return
-			}
-		} else if r.Method == "GET" {
-			resp, err := http.Head(newUrl.String())
-			if err == nil && resp.StatusCode == http.StatusOK {
+			} else if r.Method == "GET" && resp.StatusCode == http.StatusOK {
 				http.Redirect(w, r, newUrl.String(), http.StatusFound)
 				return
 			}
@@ -171,21 +171,18 @@ func handleLocal(w http.ResponseWriter, r *http.Request) {
 
 func handleRemote(w http.ResponseWriter, r *http.Request) {
 	fpath := path.Join(PKG_CACHE_DIR, path.Base(r.URL.Path))
+	_, err := os.Stat(fpath)
 
-	if r.Method == "HEAD" {
-		_, err := os.Stat(fpath)
-		if err == nil {
+	if err == nil {
+		if r.Method == "HEAD" {
 			w.WriteHeader(http.StatusOK)
-			return
+		} else if r.Method == "GET" {
+			http.ServeFile(w, r, fpath)
 		}
-	} else if r.Method == "GET" {
-		if _, err := os.Stat(fpath); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		http.ServeFile(w, r, fpath)
 		return
 	}
+
+	w.WriteHeader(http.StatusNotFound)
 }
 
 type Announce struct {
