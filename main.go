@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -121,7 +123,14 @@ func (t TagMap) IsNew(tag string) bool {
 func main() {
 	go serveMulticast()
 	go serveHttp()
-	select {}
+
+	c := make(chan os.Signal)
+	signal.Notify(c, syscall.SIGTERM, os.Kill)
+
+	select {
+	case <-c:
+		return
+	}
 }
 
 func serveHttp() {
