@@ -20,10 +20,11 @@ import (
 const (
 	HTTP_PORT         = `15678`
 	MULTICAST_ADDRESS = `224.3.45.67:15679`
-	PKG_CACHE_DIR     = `/var/cache/pacman/pkg`
-	DB_DIR            = `/var/lib/pacman/sync`
 	TTL               = 1 * time.Hour
 	MULTICAST_DELAY   = 10 * time.Minute
+
+	// Note that we only provide packages, not dbs
+	PKG_CACHE_DIR = `/var/cache/pacman/pkg`
 )
 
 var (
