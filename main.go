@@ -263,7 +263,7 @@ func (mc multicaster) listenLoop() {
 		if seenTags.IsNew(msg.Tag) {
 			mc.sendAnnounceWithTag(msg.Tag)
 		}
-		peer := net.JoinHostPort(from.IP.String(), HTTP_PORT)
+		peer := net.JoinHostPort(from.IP.String(), msg.Port)
 		peers.Add(peer)
 	}
 }
