@@ -30,6 +30,13 @@ Manual Installation
    Include = /etc/pacman.d/paclan.conf
    ```
 
+Automatic Installation
+======================
+
+A PKGBUILD is provided. Use standard makepkg procedures (see
+https://wiki.archlinux.org/index.php/Makepkg) or install it directly
+from the AUR.
+
 Running
 =======
 
