@@ -11,7 +11,7 @@ license=('CC0')
 groups=()
 makedepends=('go')
 source=("https://github.com/rakoo/paclan/archive/v0.1.zip")
-sha256sums=('3054491745b03371c8c917bc392f73b50ec0f6a8425908d4ba05571d15a0a380')
+sha256sums=('46d15485578f45f3d831b0459c737db73391a47dd5d5f05df98d4671d9e1475a')
 install=paclan.install
 
 build() {
