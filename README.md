@@ -33,7 +33,8 @@ Manual Installation
 Automatic Installation
 ======================
 
-A PKGBUILD is provided. Use standard makepkg procedures (see
+[A PKGBUILD is
+provided](https://github.com/rakoo/PKGBUILDS/tree/master/paclan). Use standard makepkg procedures (see
 https://wiki.archlinux.org/index.php/Makepkg) or install it directly
 from the AUR.
 
