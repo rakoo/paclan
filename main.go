@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -136,6 +137,18 @@ func (t TagMap) IsNew(tag string) bool {
 func main() {
 	go serveMulticast()
 	go serveHttp()
+
+	go func() {
+		for _ = range time.Tick(10 * time.Minute) {
+			peers.Lock()
+			peerSlice := make([]string, 0, len(peers.peers))
+			for peer, _ := range peers.peers {
+				peerSlice = append(peerSlice, peer)
+			}
+			log.Printf("Got %d peers: %s\n", len(peerSlice), strings.Join(peerSlice, ","))
+			peers.Unlock()
+		}
+	}()
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGTERM, os.Kill)
@@ -286,6 +299,7 @@ func (mc multicaster) listenLoop() {
 			mc.sendAnnounceWithTag(msg.Tag)
 		}
 		peer := net.JoinHostPort(from.IP.String(), msg.Port)
+		log.Printf("New peer: %s\n", peer)
 		peers.Add(peer)
 	}
 }
