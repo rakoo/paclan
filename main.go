@@ -52,7 +52,10 @@ type peerMap struct {
 }
 
 func newPeerMap() peerMap {
-	p := peerMap{peers: make(map[string]struct{})}
+	p := peerMap{
+		peers:  make(map[string]struct{}),
+		expire: make(chan string),
+	}
 	go p.expireLoop()
 
 	return p
