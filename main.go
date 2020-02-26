@@ -14,295 +14,202 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
+	"context"
+	"flag"
+	"fmt"
 	"log"
-	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
-	"strings"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Kunde21/paclan/peers"
+	"github.com/knq/ini"
 )
 
 const (
-	HTTP_PORT         = `15678`
-	MULTICAST_ADDRESS = `224.3.45.67:15679`
-	TTL               = 1 * time.Hour
-	MULTICAST_DELAY   = 10 * time.Minute
-
+	TTL       = 1 * time.Hour
+	HTTP_PORT = `15678`
 	// Note that we only provide packages, not dbs
 	PKG_CACHE_DIR = `/var/cache/pacman/pkg`
 )
 
-var (
-	peers    = newPeerMap()
-	seenTags = newTagMap()
-)
+// peers = newPeerMap(10 * time.Minute)
+var arch = ""
 
-type peerMap struct {
-	sync.Mutex
-	peers  map[string]struct{}
-	expire chan string
-}
-
-func newPeerMap() peerMap {
-	p := peerMap{
-		peers:  make(map[string]struct{}),
-		expire: make(chan string),
-	}
-	go p.expireLoop()
-
-	return p
-}
-
-func (p peerMap) expireLoop() {
-	for {
-		select {
-		case peer := <-p.expire:
-			p.Lock()
-			delete(p.peers, peer)
-			p.Unlock()
-		}
-	}
-}
-
-func (p peerMap) Add(peer string) {
-	p.Lock()
-	p.peers[peer] = struct{}{}
-	time.AfterFunc(TTL, func() { p.expire <- peer })
-	p.Unlock()
-}
-
-func (p peerMap) GetRandomOrder() []string {
-	p.Lock()
-
-	peers := make([]string, len(p.peers))
-	for peer := range p.peers {
-		max := big.NewInt(int64(len(peers)))
-		idx, err := rand.Int(rand.Reader, max)
-		if err != nil {
-			log.Printf("Couldn't get random int: %s\n", err)
-			continue
-		}
-		peers[idx.Int64()] = peer
-	}
-
-	p.Unlock()
-
-	return peers
-}
-
-type TagMap struct {
-	sync.Mutex
-	tags   map[string]struct{}
-	expire chan string
-}
-
-func newTagMap() TagMap {
-	t := TagMap{
-		tags:   make(map[string]struct{}),
-		expire: make(chan string),
-	}
-
-	go func() {
-		for {
-			select {
-			case tag := <-t.expire:
-				delete(t.tags, tag)
-			}
-		}
-	}()
-
-	return t
-}
-
-func (t TagMap) Mark(tag string) {
-	t.Lock()
-	t.tags[tag] = struct{}{}
-	time.AfterFunc(TTL, func() { t.expire <- tag })
-	t.Unlock()
-}
-
-func (t TagMap) IsNew(tag string) bool {
-	t.Lock()
-	_, ok := t.tags[tag]
-	t.Unlock()
-
-	return !ok
+type server struct {
+	*peers.DNS
+	arch string
 }
 
 func main() {
-	go serveMulticast()
-	go serveHttp()
+	iface := flag.String("i", "", "network interface to serve on (i.e. eth0)")
 
-	go func() {
-		for _ = range time.Tick(10 * time.Minute) {
-			peers.Lock()
-			peerSlice := make([]string, 0, len(peers.peers))
-			for peer, _ := range peers.peers {
-				peerSlice = append(peerSlice, peer)
-			}
-			log.Printf("Got %d peers: %s\n", len(peerSlice), strings.Join(peerSlice, ","))
-			peers.Unlock()
-		}
-	}()
-
-	c := make(chan os.Signal)
-	signal.Notify(c, syscall.SIGTERM, os.Kill)
-
-	select {
-	case <-c:
-		return
-	}
-}
-
-func serveHttp() {
-	http.Handle("/", http.HandlerFunc(handle))
-
-	log.Println("Serving from", HTTP_PORT)
-	err := http.ListenAndServe(":"+HTTP_PORT, nil)
+	conf, err := ini.LoadFile("/etc/pacman.conf")
 	if err != nil {
 		log.Fatal(err)
 	}
+	arch := conf.GetKey("options.Architecture")
+	if arch == "" || arch == "auto" {
+		out, err := exec.Command("uname", "-m").CombinedOutput()
+		if err != nil {
+			log.Fatal(err)
+		}
+		arch = string(bytes.TrimSpace(out))
+	}
+	fmt.Println("arch:", arch)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := server{DNS: peers.NewDNS(*iface, HTTP_PORT, TTL), arch: arch}
+	go func() {
+		for {
+			if err := srv.RegisterSelf(ctx, TTL); err != nil {
+				log.Println("multicast error:", err)
+			}
+			if ctx.Err() != nil {
+				log.Println("registration exiting")
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			if err := srv.Listen(ctx); err != nil {
+				log.Println("listen error:", err)
+			}
+			if ctx.Err() != nil {
+				log.Println("listener exiting")
+				return
+			}
+		}
+	}()
+
+	srvHTTP := srv.serveHttp()
+
+	c := make(chan os.Signal)
+	signal.Notify(c, syscall.SIGTERM, os.Kill)
+	select {
+	case <-c:
+		srv.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		log.Println("http server closing")
+		srvHTTP.Shutdown(ctx)
+	}
+	log.Println("exiting...")
 }
 
-func handle(w http.ResponseWriter, r *http.Request) {
+func (srv server) serveHttp() *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/", http.HandlerFunc(srv.handle))
+	srvHTTP := &http.Server{
+		Addr:              net.JoinHostPort("", HTTP_PORT),
+		Handler:           mux,
+		ReadTimeout:       5 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	go func() {
+		log.Println("Serving from", HTTP_PORT)
+		err := srvHTTP.ListenAndServe()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+	return srvHTTP
+}
+
+func (srv server) handle(w http.ResponseWriter, r *http.Request) {
 	addr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
 	if err != nil {
 		log.Printf("Error serving %s: %s\n", r.RemoteAddr, err)
 		return
 	}
-
 	if addr.IP.IsLoopback() {
-		handleLocal(w, r)
+		srv.handleLocal(w, r)
 	} else {
-		handleRemote(w, r)
+		srv.handleRemote(w, r)
 	}
 }
 
-func handleLocal(w http.ResponseWriter, r *http.Request) {
-	for _, peer := range peers.GetRandomOrder() {
-		newUrl := *r.URL
-		newUrl.Host = peer
-		newUrl.Scheme = "http"
+func (srv server) handleLocal(w http.ResponseWriter, r *http.Request) {
+	log.Println("local request:", r.URL.Path)
+	found := make(chan string, 1)
+	defer close(found)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	redir := srv.Search(ctx, r.URL)
+	if redir == "" {
+		log.Println("not found", r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	log.Println("found", r.URL, redir)
+	switch r.Method {
+	case http.MethodHead:
+		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		http.Redirect(w, r, redir, http.StatusFound)
+		return
+	}
+}
 
-		resp, err := http.Head(newUrl.String())
-		if err == nil {
-			if r.Method == "HEAD" {
-				w.WriteHeader(resp.StatusCode)
-				return
-			} else if r.Method == "GET" && resp.StatusCode == http.StatusOK {
-				http.Redirect(w, r, newUrl.String(), http.StatusFound)
+func (srv server) searchRemote(ctx context.Context, r *url.URL, found chan<- string) {
+	path := path.Join(path.Dir(path.Dir(r.Path)), runtime.GOARCH, path.Base(r.Path))
+	newUrl := *r
+	newUrl.Scheme = "http"
+	newUrl.Path = path
+	p := srv.GetPeerList()
+	wg := &sync.WaitGroup{}
+	wg.Add(len(p))
+	for _, peer := range p {
+		newUrl.Host = peer
+		log.Println("requesting peer:", p, newUrl.String())
+		go func(url string) {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+			if err != nil {
 				return
 			}
-		}
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil && resp.StatusCode == http.StatusOK {
+				found <- url
+			}
+		}(newUrl.String())
 	}
-
-	w.WriteHeader(http.StatusNotFound)
+	wg.Wait()
 }
 
-func handleRemote(w http.ResponseWriter, r *http.Request) {
-	fpath := path.Join(PKG_CACHE_DIR, path.Base(r.URL.Path))
+func (srv server) handleRemote(w http.ResponseWriter, r *http.Request) {
+	log.Println("remote request:", path.Base(path.Dir(r.URL.Path)))
+	dir, file := path.Split(r.URL.Path)
+	fpath := path.Join(PKG_CACHE_DIR, file)
+	if srv.arch != path.Base(dir) {
+		log.Println("pkg search:", path.Base(dir), file, "arch mismatch")
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	_, err := os.Stat(fpath)
-
-	if err == nil {
-		if r.Method == "HEAD" {
-			w.WriteHeader(http.StatusOK)
-		} else if r.Method == "GET" {
-			http.ServeFile(w, r, fpath)
-		}
-		return
-	}
-
-	w.WriteHeader(http.StatusNotFound)
-}
-
-type Announce struct {
-	Port string `json:"port"`
-	Tag  string `json:"tag"`
-}
-
-type multicaster struct {
-	conn *net.UDPConn
-	addr *net.UDPAddr
-}
-
-func serveMulticast() {
-	addr, err := net.ResolveUDPAddr("udp4", MULTICAST_ADDRESS)
 	if err != nil {
+		log.Println("pkg search:", file, err)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-
-	conn, err := net.ListenMulticastUDP("udp4", nil, addr)
-	if err != nil {
-		return
-	}
-
-	mc := multicaster{conn: conn, addr: addr}
-	mc.run()
-}
-
-func (mc multicaster) run() {
-	go mc.listenLoop()
-
-	mc.sendAnnounce()
-	for {
-		<-time.After(MULTICAST_DELAY)
-		mc.sendAnnounce()
-	}
-}
-
-func (mc multicaster) sendAnnounce() {
-	tagRaw := make([]byte, 8)
-	_, err := rand.Read(tagRaw)
-	if err != nil {
-		log.Printf("Couldn't create tag: %s\n", err)
-		return
-	}
-
-	tag := hex.EncodeToString(tagRaw)
-	mc.sendAnnounceWithTag(tag)
-}
-
-func (mc multicaster) sendAnnounceWithTag(tag string) {
-	msg := Announce{Port: HTTP_PORT, Tag: tag}
-	raw, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("Couldn't serialize announce: %s\n", err)
-		return
-	}
-
-	mc.conn.WriteToUDP(raw, mc.addr)
-	seenTags.Mark(msg.Tag)
-}
-
-func (mc multicaster) listenLoop() {
-	for {
-		packet := make([]byte, 256)
-		_, from, err := mc.conn.ReadFromUDP(packet)
-		if err != nil {
-			log.Printf("Error reading from %s: %s\n", from, err)
-			continue
-		}
-
-		var msg Announce
-		err = json.NewDecoder(bytes.NewReader(packet)).Decode(&msg)
-		if err != nil {
-			log.Printf("Couldn't unserialize announce [%s]: %s\n", packet, err)
-			continue
-		}
-
-		if seenTags.IsNew(msg.Tag) {
-			mc.sendAnnounceWithTag(msg.Tag)
-		}
-		peer := net.JoinHostPort(from.IP.String(), msg.Port)
-		log.Printf("New peer: %s\n", peer)
-		peers.Add(peer)
+	log.Println("pkg found:", file, err)
+	switch r.Method {
+	case http.MethodHead:
+		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		http.ServeFile(w, r, fpath)
 	}
 }
