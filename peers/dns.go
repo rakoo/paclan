@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kunde21/paclan/config"
 	"github.com/schollz/peerdiscovery"
 )
 
@@ -20,23 +21,29 @@ type Announce struct {
 }
 
 type DNS struct {
-	mu       *sync.Mutex
-	settings peerdiscovery.Settings
-	closed   bool
-	netIface string
-	port     string
-	ipFilter *net.IP
-	payload  []byte
+	mu             *sync.Mutex
+	settings       peerdiscovery.Settings
+	closed         bool
+	netIface       string
+	port           string
+	multicastAddr  string
+	multicastPort  string
+	broadcastDelay time.Duration
+	ipFilter       *net.IP
+	payload        []byte
 	peerMap
 }
 
-// NewDNS creates a list of local servers
-func NewDNS(iface string, port string, peerTimeout time.Duration) *DNS {
+// New creates a list of local servers
+func New(conf *config.Paclan) *DNS {
 	return &DNS{
-		mu:       &sync.Mutex{},
-		netIface: iface,
-		port:     port,
-		peerMap:  newPeerMap(peerTimeout),
+		mu:             &sync.Mutex{},
+		netIface:       conf.IFace,
+		port:           conf.HTTPPort,
+		peerMap:        newPeerMap(conf.PeerTimeout),
+		multicastAddr:  conf.MulticastAddr,
+		multicastPort:  conf.MulticastPort,
+		broadcastDelay: conf.PeerTimeout / 4,
 	}
 }
 
@@ -50,8 +57,34 @@ func (lhd *DNS) Close() {
 	}
 }
 
+// Serve registers peers on the LAN
+func (lhd *DNS) Serve(ctx context.Context) {
+	go func() {
+		for {
+			if err := lhd.Listen(ctx); err != nil {
+				log.Println("listen error:", err)
+			}
+			if ctx.Err() != nil {
+				log.Println("listener exiting")
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			if err := lhd.RegisterSelf(ctx); err != nil {
+				log.Println("multicast error:", err)
+			}
+			if ctx.Err() != nil {
+				log.Println("registration exiting")
+				return
+			}
+		}
+	}()
+}
+
 // RegisterSelf with the rest of the network and listen for local peers.
-func (lhd *DNS) RegisterSelf(ctx context.Context, delay time.Duration) error {
+func (lhd *DNS) RegisterSelf(ctx context.Context) error {
 	ip, err := getAddr(lhd.netIface)
 	if err != nil {
 		return err
@@ -72,13 +105,13 @@ func (lhd *DNS) RegisterSelf(ctx context.Context, delay time.Duration) error {
 		return errors.New("INVALID PAYLOAD")
 	}
 	stg := &lhd.settings
-	stg.MulticastAddress, _, _ = net.SplitHostPort(MULTICAST_ADDRESS)
-	stg.Port = MULTICAST_PORT
+	stg.MulticastAddress = lhd.multicastAddr
+	stg.Port = lhd.multicastPort
 	stg.Payload = payloadDisc
 	stg.Limit, stg.TimeLimit = -1, -1 // discover forever
 	stg.StopChan = make(chan struct{})
-	stg.Notify = lhd.Discovered
-	stg.Delay = delay
+	stg.Notify = lhd.discovered(lhd.port)
+	stg.Delay = lhd.broadcastDelay
 	log.Println("discovery started")
 	go func() {
 		<-ctx.Done()
@@ -90,48 +123,50 @@ func (lhd *DNS) RegisterSelf(ctx context.Context, delay time.Duration) error {
 	return nil
 }
 
-// Discovered a new peer.  Register and respond.
-func (lhd DNS) Discovered(disc peerdiscovery.Discovered) {
-	frIP := net.ParseIP(disc.Address)
-	if frIP.Equal(*lhd.ipFilter) {
-		return
-	}
-	var msg Announce
-	if err := json.Unmarshal(disc.Payload, &msg); err != nil {
-		log.Println(err)
-		return
-	}
-	port, err := strconv.Atoi(msg.Port)
-	switch {
-	case err != nil, port < 1, port > 65535:
-		log.Println("invalid port", frIP.String(), msg.Port)
-		return
-	}
-	lhd.add(net.JoinHostPort(frIP.String(), strconv.Itoa(port)))
-	if msg.Register {
-		return
-	}
+// discovered a new peer.  Register and respond.
+func (lhd DNS) discovered(multicastPort string) func(disc peerdiscovery.Discovered) {
+	return func(disc peerdiscovery.Discovered) {
+		frIP := net.ParseIP(disc.Address)
+		if frIP.Equal(*lhd.ipFilter) {
+			return
+		}
+		var msg Announce
+		if err := json.Unmarshal(disc.Payload, &msg); err != nil {
+			log.Println(err)
+			return
+		}
+		port, err := strconv.Atoi(msg.Port)
+		switch {
+		case err != nil, port < 1, port > 65535:
+			log.Println("invalid port", frIP.String(), msg.Port)
+			return
+		}
+		lhd.add(net.JoinHostPort(frIP.String(), strconv.Itoa(port)))
+		if msg.Register {
+			return
+		}
 
-	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(disc.Address, MULTICAST_PORT))
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	conn, err := net.DialUDP("udp4", nil, addr)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	defer conn.Close()
+		addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(disc.Address, multicastPort))
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		conn, err := net.DialUDP("udp4", nil, addr)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		defer conn.Close()
 
-	msg.Port = lhd.port
-	msg.Register = true
-	buf, err := json.Marshal(&msg)
-	if err != nil {
-		log.Println(err)
-		return
+		msg.Port = lhd.port
+		msg.Register = true
+		buf, err := json.Marshal(&msg)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		conn.Write(buf)
 	}
-	conn.Write(buf)
 }
 
 // Listen for response announcements.

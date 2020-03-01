@@ -1,0 +1,2 @@
+# To be placed in /etc/pacman.d/paclan.conf
+Server = http://localhost:15678/$repo/os/$arch
