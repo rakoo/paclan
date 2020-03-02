@@ -3,6 +3,13 @@ It is similar in functionalitis to
 [Pacserve](http://xyne.archlinux.ca/projects/pacserve/), but aims at
 simplicity.
 
+Official Fork
+=============
+Thank you to [rakoo](https://github.com/rakoo/paclan) for starting the paclan project.
+
+As of March 2020, this is the officially maintained fork of paclan.
+
+
 Manual Installation
 ===================
 
@@ -12,13 +19,14 @@ Manual Installation
     ```
     $ cd /path/to/paclan
     $ go build
-    ````
+    ```
 
 3. Copy the files in relevant places:
 
     ```
     $ cp paclan /usr/bin
     $ cp paclan.conf /etc/pacman.d/
+    $ cp mirrorlist.paclan /etc/pacman.d/
     $ cp paclan.service /usr/lib/systemd/system/
     ```
 
@@ -27,20 +35,16 @@ Manual Installation
    on the LAN:
 
    ```
-   Include = /etc/pacman.d/paclan.conf
+   Include = /etc/pacman.d/mirrorlist.paclan
    ```
 
 Automatic Installation
 ======================
 
-[A PKGBUILD is
-provided](https://github.com/rakoo/PKGBUILDS/tree/master/paclan). Use standard makepkg procedures (see
-https://wiki.archlinux.org/index.php/Makepkg) or install it directly
-from the AUR.
+Paclan is available to install directly from the [AUR](https://aur.archlinux.org/packages/paclan)
 
 Running
 =======
 
 Paclan isn't expected to be run manually, a systemd service file is
-provided. For more details, see
-https://wiki.archlinux.org/index.php/Systemd
+provided. For more details, see [Systemd Wiki](https://wiki.archlinux.org/index.php/Systemd)

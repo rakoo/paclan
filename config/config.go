@@ -70,9 +70,9 @@ func (p Paclan) pacmanConf(file string) (*Paclan, error) {
 	if err != nil {
 		return nil, err
 	}
-	cacheDir := plConf.GetKey("CacheDir")
-	if cacheDir == "" {
-		cacheDir = CACHE_DIR
+	p.CacheDir = plConf.GetKey("CacheDir")
+	if p.CacheDir == "" {
+		p.CacheDir = CACHE_DIR
 	}
 	p.Arch = plConf.GetKey("options.Architecture")
 	if p.Arch == "" || p.Arch == "auto" {
