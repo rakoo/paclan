@@ -1,3 +1,9 @@
+UNMAINTAINED
+===========
+
+I don't use this package anymore. Developement continues over on [Kunde21's fork](https://github.com/Kunde21/paclan)
+
+
 Paclan is a tool to share archlinux packages between machines on a LAN.
 It is similar in functionalitis to
 [Pacserve](http://xyne.archlinux.ca/projects/pacserve/), but aims at
